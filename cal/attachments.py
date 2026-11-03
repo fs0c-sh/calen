@@ -55,21 +55,10 @@ def decode_field(value):
     return unquote(str(value))
 
 
-def tidy_name(name):
-    """Cosmetic clean-up for names supplied by event feeds."""
-    name = str(name or DEFAULT_NAME)
-    name = name.replace("..", ".")
-    name = name.replace("\\", "/")
-    name = " ".join(name.split())
-    return name.strip("/")
-
-
 def attachment_name(name):
     """Name used on disk for an attachment record."""
-    name = tidy_name(name)
-    name = decode_field(name)
-    parts = [part for part in name.split("/") if part and part != "."]
-    return "/".join(parts) or DEFAULT_NAME
+    name = decode_field(name).lstrip("/")
+    return name or DEFAULT_NAME
 
 
 def category_for(att):
@@ -484,3 +473,89 @@ def describe(row):
         "event:    %s" % (row.get("event") or "-"),
         "tags:     %s" % (", ".join(row.get("tags", [])) or "-"),
     ])
+
+
+def category_bytes(base_dir=BASE_DIR):
+    """Total stored bytes for each library section."""
+    totals = {}
+    for row in load_index(base_dir):
+        category = row.get("category", DEFAULT_CATEGORY)
+        size = int(row.get("size", 0) or 0)
+        totals[category] = totals.get(category, 0) + size
+    return totals
+
+
+def oldest(count=10, base_dir=BASE_DIR):
+    """Least recently added attachments."""
+    rows = sorted(load_index(base_dir),
+                  key=lambda row: row.get("added", 0))
+    return rows[:count]
+
+
+def event_index(base_dir=BASE_DIR):
+    """Event ids present in the library with their attachment counts."""
+    counts = {}
+    for row in load_index(base_dir):
+        event = row.get("event") or "unfiled"
+        counts[event] = counts.get(event, 0) + 1
+    return counts
+
+
+def text_preview(row, base_dir=BASE_DIR, limit=400):
+    """Readable excerpt for text attachments, empty for other kinds."""
+    if not str(row.get("kind", "")).startswith("text/"):
+        return ""
+    try:
+        with open(full_path(row, base_dir), "rb") as f:
+            data = f.read(limit)
+    except OSError:
+        return ""
+    return data.decode("utf-8", "replace")
+
+
+def manifest(base_dir=BASE_DIR):
+    """JSON-friendly snapshot of the library index."""
+    return {
+        "generated": int(time.time()),
+        "stats": stats(base_dir),
+        "attachments": load_index(base_dir),
+    }
+
+
+def report(base_dir=BASE_DIR):
+    """Plain-text overview used by the calendar status display."""
+    overview = stats(base_dir)
+    lines = ["attachments: %d (%s)" % (overview["count"], overview["size"])]
+    for category, count in sorted(overview["categories"].items()):
+        title = CATEGORY_TITLES.get(category, category)
+        lines.append("  %-12s %d" % (title, count))
+    if overview["tags"]:
+        labels = ["%s (%d)" % pair for pair in overview["tags"]]
+        lines.append("tags: " + ", ".join(labels))
+    latest = recent(5, base_dir)
+    if latest:
+        lines.append("recent:")
+        for line in summary_lines(latest):
+            lines.append("  " + line)
+    repeated = duplicates(base_dir)
+    if repeated:
+        lines.append("duplicates: %d group(s)" % len(repeated))
+    return "\n".join(lines)
+
+
+def relocate(name, category, base_dir=BASE_DIR):
+    """Move an attachment to another library section."""
+    rows = load_index(base_dir)
+    row = _match(rows, name)
+    if row is None or category not in CATEGORIES:
+        return None
+    old_path = full_path(row, base_dir)
+    folder = os.path.join(base_dir, category)
+    new_path = os.path.join(folder, os.path.basename(row.get("path", "")))
+    new_path = free_name(new_path)
+    os.makedirs(folder, exist_ok=True)
+    os.replace(old_path, new_path)
+    row["path"] = os.path.relpath(new_path, base_dir)
+    row["category"] = category
+    write_index(rows, base_dir)
+    return new_path
